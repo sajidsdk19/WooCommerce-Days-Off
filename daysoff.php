@@ -1,11 +1,11 @@
 <?php
 /**
  * Plugin Name: WooCommerce Delivery Date Manager
- * Plugin URI: https://yourwebsite.com
+ * Plugin URI: https://sajidkhan.me
  * Description: Manage delivery dates with custom day-off settings, weekend restrictions, and minimum processing days
  * Version: 1.0.0
- * Author: Your Name
- * Author URI: https://yourwebsite.com
+ * Author: Sajid Khan
+ * Author URI: https://sajidkhan.me
  * Text Domain: woo-delivery-manager
  * Domain Path: /languages
  * Requires at least: 5.0
@@ -17,6 +17,13 @@
 if (!defined('ABSPATH')) {
     exit; // Exit if accessed directly
 }
+
+// Declare HPOS compatibility
+add_action('before_woocommerce_init', function() {
+    if (class_exists(\Automattic\WooCommerce\Utilities\FeaturesUtil::class)) {
+        \Automattic\WooCommerce\Utilities\FeaturesUtil::declare_compatibility('custom_order_tables', __FILE__, true);
+    }
+});
 
 class WooCommerce_Delivery_Date_Manager {
     
@@ -72,13 +79,118 @@ class WooCommerce_Delivery_Date_Manager {
             return;
         }
         
-        wp_enqueue_style('wdm-admin-css', plugin_dir_url(__FILE__) . 'assets/admin.css', array(), '1.0.0');
-        wp_enqueue_script('wdm-admin-js', plugin_dir_url(__FILE__) . 'assets/admin.js', array('jquery'), '1.0.0', true);
+        // Enqueue inline JavaScript instead of external file
+        wp_enqueue_script('jquery');
         
-        wp_localize_script('wdm-admin-js', 'wdmAjax', array(
-            'ajax_url' => admin_url('admin-ajax.php'),
-            'nonce' => wp_create_nonce('wdm_nonce')
-        ));
+        $inline_js = "
+        jQuery(document).ready(function($) {
+            // Add day-off
+            $('#add_dayoff_btn').on('click', function() {
+                var date = $('#new_dayoff_date').val();
+                var reason = $('#new_dayoff_reason').val();
+                
+                if (!date) {
+                    alert('Please select a date');
+                    return;
+                }
+                
+                // Show loading state
+                var btn = $(this);
+                var originalText = btn.text();
+                btn.prop('disabled', true).text('Adding...');
+                
+                $.ajax({
+                    url: '" . admin_url('admin-ajax.php') . "',
+                    type: 'POST',
+                    data: {
+                        action: 'wdm_add_dayoff',
+                        nonce: '" . wp_create_nonce('wdm_nonce') . "',
+                        date: date,
+                        reason: reason
+                    },
+                    success: function(response) {
+                        btn.prop('disabled', false).text(originalText);
+                        
+                        if (response.success) {
+                            var data = response.data;
+                            var row = '<tr data-date=\"' + data.date + '\">' +
+                                '<td><strong>' + data.formatted_date + '</strong></td>' +
+                                '<td>' + data.day_name + '</td>' +
+                                '<td>' + data.reason + '</td>' +
+                                '<td><button type=\"button\" class=\"button button-small delete-dayoff\" data-date=\"' + data.date + '\">Remove</button></td>' +
+                                '</tr>';
+                            
+                            // Remove empty message if exists
+                            $('#dayoff_list tr:contains(\"No custom day-offs\")').remove();
+                            
+                            $('#dayoff_list').append(row);
+                            $('#new_dayoff_date').val('');
+                            $('#new_dayoff_reason').val('');
+                            
+                            // Show success message
+                            var successMsg = $('<div class=\"notice notice-success is-dismissible\" style=\"margin: 10px 0;\"><p>Day-off added successfully!</p></div>');
+                            $('.wdm-add-dayoff').after(successMsg);
+                            setTimeout(function() {
+                                successMsg.fadeOut(function() { $(this).remove(); });
+                            }, 3000);
+                        } else {
+                            alert('Error: ' + response.data);
+                        }
+                    },
+                    error: function(xhr, status, error) {
+                        btn.prop('disabled', false).text(originalText);
+                        alert('AJAX Error: ' + error);
+                        console.log(xhr.responseText);
+                    }
+                });
+            });
+            
+            // Remove day-off
+            $(document).on('click', '.delete-dayoff', function() {
+                if (!confirm('Are you sure you want to remove this day-off?')) {
+                    return;
+                }
+                
+                var date = $(this).data('date');
+                var row = $(this).closest('tr');
+                var btn = $(this);
+                
+                btn.prop('disabled', true).text('Removing...');
+                
+                $.ajax({
+                    url: '" . admin_url('admin-ajax.php') . "',
+                    type: 'POST',
+                    data: {
+                        action: 'wdm_remove_dayoff',
+                        nonce: '" . wp_create_nonce('wdm_nonce') . "',
+                        date: date
+                    },
+                    success: function(response) {
+                        if (response.success) {
+                            row.fadeOut(function() {
+                                $(this).remove();
+                                
+                                // Add \"no day-offs\" message if list is empty
+                                if ($('#dayoff_list tr').length === 0) {
+                                    $('#dayoff_list').html('<tr><td colspan=\"4\" style=\"text-align: center; color: #999;\">No custom day-offs scheduled</td></tr>');
+                                }
+                            });
+                        } else {
+                            btn.prop('disabled', false).text('Remove');
+                            alert('Error: ' + response.data);
+                        }
+                    },
+                    error: function(xhr, status, error) {
+                        btn.prop('disabled', false).text('Remove');
+                        alert('AJAX Error: ' + error);
+                        console.log(xhr.responseText);
+                    }
+                });
+            });
+        });
+        ";
+        
+        wp_add_inline_script('jquery', $inline_js);
     }
     
     /**
@@ -565,50 +677,80 @@ class WooCommerce_Delivery_Date_Manager {
     }
     
     /**
-     * Save delivery date to order
+     * Save delivery date to order (HPOS Compatible)
      */
     public function save_delivery_date($order_id) {
         if (isset($_POST['billing_date']) && !empty($_POST['billing_date'])) {
             $billing_date = sanitize_text_field($_POST['billing_date']);
-            update_post_meta($order_id, '_billing_date', $billing_date);
-            update_post_meta($order_id, '_delivery_date', $billing_date);
+            
+            // Get order object (HPOS compatible)
+            $order = wc_get_order($order_id);
+            
+            if ($order) {
+                // Use HPOS-compatible meta data methods
+                $order->update_meta_data('_billing_date', $billing_date);
+                $order->update_meta_data('_delivery_date', $billing_date);
+                $order->save();
+            }
         }
     }
     
     /**
-     * Display in admin
+     * Display in admin (HPOS Compatible)
      */
     public function display_in_admin($order) {
-        $delivery_date = get_post_meta($order->get_id(), '_billing_date', true);
-        if ($delivery_date) {
-            $formatted_date = date('l, F j, Y', strtotime($delivery_date));
-            echo '<p><strong>Delivery Date:</strong> ' . esc_html($formatted_date) . '</p>';
+        // Get order object (already passed as parameter, but ensure it's the right type)
+        if (!is_a($order, 'WC_Order')) {
+            $order = wc_get_order($order);
         }
-    }
-    
-    /**
-     * Add to emails
-     */
-    public function add_to_emails($order, $sent_to_admin, $plain_text, $email) {
-        $delivery_date = get_post_meta($order->get_id(), '_billing_date', true);
-        if ($delivery_date) {
-            $formatted_date = date('l, F j, Y', strtotime($delivery_date));
-            if ($plain_text) {
-                echo "\nDelivery Date: " . $formatted_date . "\n";
-            } else {
+        
+        if ($order) {
+            $delivery_date = $order->get_meta('_billing_date', true);
+            
+            if ($delivery_date) {
+                $formatted_date = date('l, F j, Y', strtotime($delivery_date));
                 echo '<p><strong>Delivery Date:</strong> ' . esc_html($formatted_date) . '</p>';
             }
         }
     }
     
     /**
-     * Display on thank you page
+     * Add to emails (HPOS Compatible)
+     */
+    public function add_to_emails($order, $sent_to_admin, $plain_text, $email) {
+        // Ensure we have an order object
+        if (!is_a($order, 'WC_Order')) {
+            $order = wc_get_order($order);
+        }
+        
+        if ($order) {
+            $delivery_date = $order->get_meta('_billing_date', true);
+            
+            if ($delivery_date) {
+                $formatted_date = date('l, F j, Y', strtotime($delivery_date));
+                
+                if ($plain_text) {
+                    echo "\nDelivery Date: " . $formatted_date . "\n";
+                } else {
+                    echo '<p><strong>Delivery Date:</strong> ' . esc_html($formatted_date) . '</p>';
+                }
+            }
+        }
+    }
+    
+    /**
+     * Display on thank you page (HPOS Compatible)
      */
     public function display_on_thankyou($order_id) {
-        $delivery_date = get_post_meta($order_id, '_billing_date', true);
-        if ($delivery_date) {
-            $formatted_date = date('l, F j, Y', strtotime($delivery_date));
-            echo '<p><strong>Your selected delivery date:</strong> ' . esc_html($formatted_date) . '</p>';
+        $order = wc_get_order($order_id);
+        
+        if ($order) {
+            $delivery_date = $order->get_meta('_billing_date', true);
+            
+            if ($delivery_date) {
+                $formatted_date = date('l, F j, Y', strtotime($delivery_date));
+                echo '<p><strong>Your selected delivery date:</strong> ' . esc_html($formatted_date) . '</p>';
+            }
         }
     }
 }
