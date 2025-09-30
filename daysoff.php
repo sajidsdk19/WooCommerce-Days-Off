@@ -533,149 +533,179 @@ class WooCommerce_Delivery_Date_Manager {
     }
     
     /**
-     * Frontend date restrictions
-     */
-    public function checkout_date_restrictions() {
-        if (!is_checkout()) {
+ * Frontend date restrictions
+ */
+public function checkout_date_restrictions() {
+    if (!is_checkout()) {
+        return;
+    }
+    
+    $settings = $this->get_settings();
+    $disabled = $this->get_disabled_dates();
+    ?>
+    <script>
+    jQuery(document).ready(function($) {
+        var dateField = $('input[name="billing_date"]');
+        
+        if (dateField.length) {
+            var minDays = <?php echo intval($settings['minimum_days']); ?>;
+            var disabledDays = <?php echo json_encode($disabled['days']); ?>;
+            var disabledDates = <?php echo json_encode($disabled['dates']); ?>;
+            
+            // Calculate minimum date (accounting for disabled days)
+            var today = new Date();
+            var minDate = new Date(today);
+            var daysAdded = 0;
+            
+            // Add processing days, skipping disabled days
+            while (daysAdded < minDays) {
+                minDate.setDate(minDate.getDate() + 1);
+                // Only count this day if it's not disabled
+                if (!disabledDays.includes(minDate.getDay()) && 
+                    !disabledDates.includes(minDate.toISOString().split('T')[0])) {
+                    daysAdded++;
+                }
+            }
+            
+            var minDateString = minDate.toISOString().split('T')[0];
+            dateField.attr('min', minDateString);
+            dateField.attr('placeholder', 'Select delivery date (min. ' + minDays + ' day' + (minDays != 1 ? 's' : '') + ' processing)');
+            
+            // Validation
+            dateField.on('change input blur', function() {
+                var selectedValue = $(this).val();
+                
+                if (!selectedValue) {
+                    return;
+                }
+                
+                var selectedDate = new Date(selectedValue + 'T00:00:00');
+                var currentDate = new Date();
+                currentDate.setHours(0,0,0,0);
+                
+                // Check if date is in the past or today
+                if (selectedDate <= currentDate) {
+                    showDateError('Please select a future date. Orders require ' + minDays + ' day(s) to process.');
+                    $(this).val('');
+                    return false;
+                }
+                
+                // Check if selected date meets minimum processing days (counting only available days)
+                var checkDate = new Date(currentDate);
+                var availableDays = 0;
+                
+                while (checkDate < selectedDate) {
+                    checkDate.setDate(checkDate.getDate() + 1);
+                    var dateString = checkDate.toISOString().split('T')[0];
+                    
+                    // Count this day if it's not disabled
+                    if (!disabledDays.includes(checkDate.getDay()) && 
+                        !disabledDates.includes(dateString)) {
+                        availableDays++;
+                    }
+                }
+                
+                if (availableDays < minDays) {
+                    showDateError('Orders require ' + minDays + ' available day(s) to process. Please select a later date (excluding disabled days).');
+                    $(this).val('');
+                    return false;
+                }
+                
+                // Check disabled days of week
+                if (disabledDays.includes(selectedDate.getDay())) {
+                    var dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+                    showDateError(dayNames[selectedDate.getDay()] + ' delivery is not available. Please select another date.');
+                    $(this).val('');
+                    return false;
+                }
+                
+                // Check custom disabled dates
+                if (disabledDates.includes(selectedValue)) {
+                    showDateError('Delivery is not available on this date. Please select another date.');
+                    $(this).val('');
+                    return false;
+                }
+                
+                $(this).removeClass('date-error');
+                $('.date-error-message').remove();
+            });
+            
+            function showDateError(message) {
+                dateField.addClass('date-error');
+                $('.date-error-message').remove();
+                dateField.after('<div class="date-error-message" style="color: #e74c3c; font-size: 12px; margin-top: 5px; background: #fdf2f2; border: 1px solid #e74c3c; padding: 8px; border-radius: 3px;">' + message + '</div>');
+                setTimeout(function() {
+                    $('.date-error-message').fadeOut();
+                }, 5000);
+            }
+        }
+    });
+    </script>
+    
+    <style>
+    input[name="billing_date"].date-error {
+        border-color: #e74c3c !important;
+        background-color: #fdf2f2 !important;
+    }
+    </style>
+    <?php
+}
+
+/**
+ * Server-side validation
+ */
+public function validate_billing_date() {
+    if (isset($_POST['billing_date']) && !empty($_POST['billing_date'])) {
+        $selected_date = sanitize_text_field($_POST['billing_date']);
+        $selected_timestamp = strtotime($selected_date);
+        $settings = $this->get_settings();
+        $disabled = $this->get_disabled_dates();
+        
+        if (!$selected_timestamp) {
+            wc_add_notice('Please enter a valid delivery date.', 'error');
             return;
         }
         
-        $settings = $this->get_settings();
-        $disabled = $this->get_disabled_dates();
-        ?>
-        <script>
-        jQuery(document).ready(function($) {
-            var dateField = $('input[name="billing_date"]');
-            
-            if (dateField.length) {
-                var minDays = <?php echo intval($settings['minimum_days']); ?>;
-                var disabledDays = <?php echo json_encode($disabled['days']); ?>;
-                var disabledDates = <?php echo json_encode($disabled['dates']); ?>;
-                
-                // Calculate minimum date
-                var today = new Date();
-                var minDate = new Date(today);
-                minDate.setDate(today.getDate() + minDays);
-                
-                // Skip disabled days for minimum date
-                while (disabledDays.includes(minDate.getDay())) {
-                    minDate.setDate(minDate.getDate() + 1);
-                }
-                
-                var minDateString = minDate.toISOString().split('T')[0];
-                dateField.attr('min', minDateString);
-                dateField.attr('placeholder', 'Select delivery date');
-                
-                // Validation
-                dateField.on('change input blur', function() {
-                    var selectedValue = $(this).val();
-                    
-                    if (!selectedValue) {
-                        return;
-                    }
-                    
-                    var selectedDate = new Date(selectedValue);
-                    var currentDate = new Date();
-                    currentDate.setHours(0,0,0,0);
-                    
-                    // Check past dates
-                    if (selectedDate <= currentDate) {
-                        showDateError('Please select a future date. Orders require ' + minDays + ' day(s) to process.');
-                        $(this).val('');
-                        return false;
-                    }
-                    
-                    // Check minimum processing days
-                    var minProcessDate = new Date();
-                    minProcessDate.setDate(minProcessDate.getDate() + minDays);
-                    minProcessDate.setHours(0,0,0,0);
-                    
-                    if (selectedDate < minProcessDate) {
-                        showDateError('Orders require ' + minDays + ' day(s) to process. Please select a later date.');
-                        $(this).val('');
-                        return false;
-                    }
-                    
-                    // Check disabled days
-                    if (disabledDays.includes(selectedDate.getDay())) {
-                        var dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-                        showDateError(dayNames[selectedDate.getDay()] + ' delivery is not available. Please select another date.');
-                        $(this).val('');
-                        return false;
-                    }
-                    
-                    // Check custom disabled dates
-                    if (disabledDates.includes(selectedValue)) {
-                        showDateError('Delivery is not available on this date. Please select another date.');
-                        $(this).val('');
-                        return false;
-                    }
-                    
-                    $(this).removeClass('date-error');
-                    $('.date-error-message').remove();
-                });
-                
-                function showDateError(message) {
-                    dateField.addClass('date-error');
-                    $('.date-error-message').remove();
-                    dateField.after('<div class="date-error-message" style="color: #e74c3c; font-size: 12px; margin-top: 5px; background: #fdf2f2; border: 1px solid #e74c3c; padding: 8px; border-radius: 3px;">' + message + '</div>');
-                    setTimeout(function() {
-                        $('.date-error-message').fadeOut();
-                    }, 5000);
-                }
-            }
-        });
-        </script>
+        $current_timestamp = strtotime('today');
+        if ($selected_timestamp <= $current_timestamp) {
+            wc_add_notice('Delivery date cannot be today or in the past.', 'error');
+            return;
+        }
         
-        <style>
-        input[name="billing_date"].date-error {
-            border-color: #e74c3c !important;
-            background-color: #fdf2f2 !important;
-        }
-        </style>
-        <?php
-    }
-    
-    /**
-     * Server-side validation
-     */
-    public function validate_billing_date() {
-        if (isset($_POST['billing_date']) && !empty($_POST['billing_date'])) {
-            $selected_date = sanitize_text_field($_POST['billing_date']);
-            $selected_timestamp = strtotime($selected_date);
-            $settings = $this->get_settings();
-            $disabled = $this->get_disabled_dates();
+        // Count available days between today and selected date
+        $available_days = 0;
+        $check_date = $current_timestamp;
+        
+        while ($check_date < $selected_timestamp) {
+            $check_date = strtotime('+1 day', $check_date);
+            $check_day = date('w', $check_date);
+            $check_date_string = date('Y-m-d', $check_date);
             
-            if (!$selected_timestamp) {
-                wc_add_notice('Please enter a valid delivery date.', 'error');
-                return;
-            }
-            
-            $current_timestamp = strtotime('today');
-            if ($selected_timestamp <= $current_timestamp) {
-                wc_add_notice('Delivery date cannot be today or in the past.', 'error');
-                return;
-            }
-            
-            $min_timestamp = strtotime('+' . $settings['minimum_days'] . ' days');
-            if ($selected_timestamp < $min_timestamp) {
-                wc_add_notice('Delivery date must be at least ' . $settings['minimum_days'] . ' day(s) from today.', 'error');
-                return;
-            }
-            
-            $selected_day = date('w', $selected_timestamp);
-            if (in_array($selected_day, $disabled['days'])) {
-                wc_add_notice('Delivery is not available on the selected day of the week.', 'error');
-                return;
-            }
-            
-            if (in_array($selected_date, $disabled['dates'])) {
-                wc_add_notice('Delivery is not available on this date.', 'error');
-                return;
+            // Count this day if it's not disabled
+            if (!in_array($check_day, $disabled['days']) && 
+                !in_array($check_date_string, $disabled['dates'])) {
+                $available_days++;
             }
         }
+        
+        if ($available_days < $settings['minimum_days']) {
+            wc_add_notice('Delivery date must have at least ' . $settings['minimum_days'] . ' available day(s) for processing (excluding disabled days).', 'error');
+            return;
+        }
+        
+        // Check if selected date itself is disabled
+        $selected_day = date('w', $selected_timestamp);
+        if (in_array($selected_day, $disabled['days'])) {
+            wc_add_notice('Delivery is not available on the selected day of the week.', 'error');
+            return;
+        }
+        
+        if (in_array($selected_date, $disabled['dates'])) {
+            wc_add_notice('Delivery is not available on this date.', 'error');
+            return;
+        }
     }
-    
+}
     /**
      * Save delivery date to order (HPOS Compatible)
      */
